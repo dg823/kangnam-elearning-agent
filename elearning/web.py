@@ -252,9 +252,15 @@ function render(){
   if(TAB==='todo') items = items.filter(x=>x.submitted===false);
   const box = document.getElementById('list');
   if(!items.length){ box.innerHTML='<div class="empty">표시할 마감이 없습니다.</div>'; return; }
-  const order=['지난 마감','오늘','내일','이번 주','이후','기타'];
+  // 다가오는 마감을 위로(가까운 순), 지난 마감은 맨 아래(최근 지난 것 먼저)
+  const grank={'오늘':0,'내일':1,'이번 주':2,'이후':3,'지난 마감':4,'기타':5};
   let html='', last=null;
-  items.sort((a,b)=> (a.days_left??1e9)-(b.days_left??1e9));
+  items.sort((a,b)=>{
+    const ra=grank[group(a.days_left)], rb=grank[group(b.days_left)];
+    if(ra!==rb) return ra-rb;
+    if(ra===4) return (b.days_left) - (a.days_left);   // 지난 마감: 최근 것 먼저
+    return (a.days_left??1e9)-(b.days_left??1e9);        // 그 외: 가까운 마감 먼저
+  });
   for(const it of items){
     const g=group(it.days_left);
     if(g!==last){ html+=`<div class="group">${g}</div>`; last=g; }
