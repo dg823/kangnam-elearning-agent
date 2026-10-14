@@ -5,3 +5,4 @@ __pycache__/
 .cache/
 *.ics
 .session_cookies.json
+.web_cache.json

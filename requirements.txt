@@ -4,3 +4,5 @@ lxml>=5.2
 icalendar>=6.0
 python-dotenv>=1.0
 rich>=13.7
+flask>=3.0
+gunicorn>=21.2

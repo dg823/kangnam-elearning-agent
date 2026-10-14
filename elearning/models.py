@@ -40,6 +40,31 @@ class Deadline:
         dl = self.days_left
         return dl is not None and dl < 0
 
+    def to_dict(self) -> dict:
+        return {
+            "title": self.title,
+            "due": self.due.isoformat() if self.due else None,
+            "course": self.course,
+            "kind": self.kind,
+            "url": self.url,
+            "source": self.source,
+            "submitted": self.submitted,
+            "time_known": self.time_known,
+            "description": self.description,
+            "raw_id": self.raw_id,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Deadline":
+        due = datetime.fromisoformat(d["due"]) if d.get("due") else None
+        return cls(
+            title=d.get("title", ""), due=due, course=d.get("course", ""),
+            kind=d.get("kind", "unknown"), url=d.get("url", ""),
+            source=d.get("source", ""), submitted=d.get("submitted"),
+            time_known=d.get("time_known", True), description=d.get("description", ""),
+            raw_id=d.get("raw_id", ""),
+        )
+
 
 @dataclass
 class Course:

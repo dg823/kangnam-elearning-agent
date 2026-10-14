@@ -1,0 +1,19 @@
+# Render.com 배포 설정 (Blueprint)
+# 비밀번호 등 민감값은 sync:false 라서 저장소에 저장되지 않고,
+# Render 대시보드에서 직접 입력한다.
+services:
+  - type: web
+    name: kangnam-elearning
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn elearning.web:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120
+    envVars:
+      - key: ECAMPUS_ICAL_URL
+        sync: false
+      - key: KNU_USERNAME
+        sync: false
+      - key: KNU_PASSWORD
+        sync: false
+      - key: WEB_TOKEN
+        sync: false
