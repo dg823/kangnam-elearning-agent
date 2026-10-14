@@ -209,6 +209,33 @@ PAGE = r"""<!doctype html>
   .spin { display:inline-block; width:13px; height:13px; border:2px solid var(--dim);
           border-top-color:transparent; border-radius:50%; animation:r .8s linear infinite; }
   @keyframes r { to { transform:rotate(360deg); } }
+  /* 뷰 전환 */
+  .seg { display:flex; gap:8px; margin:12px 0; }
+  .seg div { flex:1; text-align:center; padding:10px; border-radius:11px; background:var(--card);
+             border:1px solid var(--line); color:var(--dim); font-size:15px; font-weight:600; }
+  .seg div.on { color:#fff; background:var(--indigo); border-color:var(--indigo); }
+  /* 캘린더 */
+  .calhead { display:flex; align-items:center; justify-content:space-between; margin:6px 2px 10px; }
+  .calhead b { font-size:17px; }
+  .navbtn { background:var(--card); border:1px solid var(--line); color:var(--fg);
+            border-radius:10px; width:40px; height:36px; font-size:16px; }
+  .cal { display:grid; grid-template-columns:repeat(7,1fr); gap:5px; }
+  .dow { text-align:center; font-size:12px; color:var(--dim); padding:4px 0; }
+  .cell { aspect-ratio:1; background:var(--card); border:1px solid var(--line); border-radius:10px;
+          padding:5px 0 0; display:flex; flex-direction:column; align-items:center; gap:3px;
+          font-size:13px; color:var(--fg); position:relative; }
+  .cell.empty-cell { background:transparent; border:none; }
+  .cell.has { cursor:pointer; }
+  .cell.today { border-color:var(--indigo); }
+  .cell.sel { background:var(--indigo); border-color:var(--indigo); color:#fff; }
+  .cell .dnum { font-weight:600; }
+  .cell.sun .dnum { color:var(--red); } .cell.sat .dnum { color:#7aa2ff; }
+  .cell.sel .dnum { color:#fff; }
+  .dots { display:flex; gap:2px; flex-wrap:wrap; justify-content:center; }
+  .dot { width:5px; height:5px; border-radius:50%; }
+  .dot.miss { background:var(--red); } .dot.done { background:var(--green); }
+  .dot.etc { background:var(--amber); }
+  .seldate { font-size:14px; color:var(--dim); margin:16px 2px 8px; font-weight:600; }
 </style>
 </head>
 <body>
@@ -222,12 +249,29 @@ PAGE = r"""<!doctype html>
     <button class="btn" onclick="ask()">질문</button>
   </div>
   <div class="answer" id="answer"></div>
-  <div class="tabs">
-    <div class="tab on" id="tab-all" onclick="setTab('all')">전체</div>
-    <div class="tab" id="tab-todo" onclick="setTab('todo')">미제출만</div>
-    <button class="btn ghost" onclick="refresh()" id="refbtn">↻</button>
+  <div class="seg">
+    <div class="on" id="seg-list" onclick="setView('list')">📋 목록</div>
+    <div id="seg-cal" onclick="setView('cal')">📅 캘린더</div>
   </div>
-  <div id="list"></div>
+
+  <div id="listView">
+    <div class="tabs">
+      <div class="tab on" id="tab-all" onclick="setTab('all')">전체</div>
+      <div class="tab" id="tab-todo" onclick="setTab('todo')">미제출만</div>
+      <button class="btn ghost" onclick="refresh()" id="refbtn">↻</button>
+    </div>
+    <div id="list"></div>
+  </div>
+
+  <div id="calView" style="display:none">
+    <div class="calhead">
+      <button class="navbtn" onclick="moveMonth(-1)">‹</button>
+      <b id="calTitle"></b>
+      <button class="navbtn" onclick="moveMonth(1)">›</button>
+    </div>
+    <div class="cal" id="calGrid"></div>
+    <div id="dayList"></div>
+  </div>
 </div>
 <script>
 let DATA = [], TAB = 'all';
@@ -283,7 +327,7 @@ const TOKEN = new URLSearchParams(location.search).get('token');
 function api(p){ return p + (TOKEN?(p.includes('?')?'&':'?')+'token='+encodeURIComponent(TOKEN):''); }
 async function load(){
   const r = await fetch(api('/api/data')); const j = await r.json();
-  DATA = j.deadlines; render();
+  DATA = j.deadlines; render(); if(VIEW==='cal') renderCal();
   document.getElementById('mode').textContent = '· '+j.mode+' 모드';
   const t = j.fetched_at? new Date(j.fetched_at).toLocaleString('ko-KR',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}):'없음';
   document.getElementById('meta').innerHTML = (j.refreshing?'<span class="spin"></span> 갱신 중… ':'')
@@ -302,6 +346,75 @@ async function ask(){
     a.textContent=j.answer; }catch(e){ a.textContent='오류: '+e; }
 }
 document.getElementById('q').addEventListener('keydown',e=>{ if(e.key==='Enter') ask(); });
+
+// ===== 캘린더 =====
+let VIEW='list';
+const _now=new Date();
+let CY=+_now.toLocaleString('en-US',{year:'numeric',timeZone:'Asia/Seoul'});
+let CM=+_now.toLocaleString('en-US',{month:'numeric',timeZone:'Asia/Seoul'})-1; // 0-기반
+let SEL=null;
+const TODAY=new Date().toLocaleDateString('en-CA',{timeZone:'Asia/Seoul'});
+function kstDay(iso){ return iso? new Date(iso).toLocaleDateString('en-CA',{timeZone:'Asia/Seoul'}) : null; }
+function setView(v){
+  VIEW=v;
+  document.getElementById('seg-list').classList.toggle('on',v==='list');
+  document.getElementById('seg-cal').classList.toggle('on',v==='cal');
+  document.getElementById('listView').style.display = v==='list'?'':'none';
+  document.getElementById('calView').style.display = v==='cal'?'':'none';
+  if(v==='cal') renderCal();
+}
+function moveMonth(d){ CM+=d; if(CM<0){CM=11;CY--;} if(CM>11){CM=0;CY++;} SEL=null; renderCal(); }
+function byDay(){
+  const m={};
+  for(const it of DATA){ const k=kstDay(it.due); if(!k) continue; (m[k]=m[k]||[]).push(it); }
+  return m;
+}
+function renderCal(){
+  const map=byDay();
+  document.getElementById('calTitle').textContent=`${CY}년 ${CM+1}월`;
+  const first=new Date(CY,CM,1).getDay();        // 1일의 요일(0=일)
+  const days=new Date(CY,CM+1,0).getDate();       // 이달 일수
+  const dows=['일','월','화','수','목','금','토'];
+  let h = dows.map((d,i)=>`<div class="dow" style="color:${i===0?'var(--red)':i===6?'#7aa2ff':'var(--dim)'}">${d}</div>`).join('');
+  for(let i=0;i<first;i++) h+='<div class="cell empty-cell"></div>';
+  for(let d=1; d<=days; d++){
+    const ds=`${CY}-${String(CM+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+    const items=map[ds]||[]; const dow=new Date(CY,CM,d).getDay();
+    const cls=['cell']; if(items.length) cls.push('has');
+    if(ds===TODAY) cls.push('today'); if(ds===SEL) cls.push('sel');
+    if(dow===0) cls.push('sun'); if(dow===6) cls.push('sat');
+    let dots='';
+    for(const it of items.slice(0,4)){
+      const c = it.submitted===false?'miss':(it.submitted===true?'done':'etc');
+      dots+=`<span class="dot ${c}"></span>`;
+    }
+    h+=`<div class="${cls.join(' ')}" ${items.length?`onclick="selectDay('${ds}')"`:''}>
+        <span class="dnum">${d}</span><span class="dots">${dots}</span></div>`;
+  }
+  document.getElementById('calGrid').innerHTML=h;
+  renderDayList(map);
+}
+function selectDay(ds){ SEL=(SEL===ds?null:ds); renderCal(); }
+function renderDayList(map){
+  const box=document.getElementById('dayList');
+  if(!SEL){ box.innerHTML='<div class="seldate">날짜를 누르면 그날 마감이 보여요.</div>'; return; }
+  const items=(map||byDay())[SEL]||[];
+  const [y,m,d]=SEL.split('-');
+  let h=`<div class="seldate">${+m}월 ${+d}일 마감 ${items.length}건</div>`;
+  items.sort((a,b)=> (a.due||'').localeCompare(b.due||''));
+  for(const it of items){
+    let badge='';
+    if(it.submitted===true) badge='<span class="badge b-done">제출✓</span>';
+    else if(it.submitted===false) badge='<span class="badge b-miss">미제출</span>';
+    const href=it.url?`href="${it.url}" target="_blank"`:'';
+    h+=`<a class="card" ${href}>
+      <div class="dday ${ddClass(it.days_left)}">${ddText(it.days_left)}</div>
+      <div class="ci"><div class="t">${esc(it.title)}</div>
+        <div class="s">${fmtDue(it.due,it.time_known)} · ${kmap[it.kind]||it.kind} · ${esc(it.course)}</div></div>
+      ${badge}</a>`;
+  }
+  box.innerHTML=h;
+}
 load();
 </script>
 </body>
