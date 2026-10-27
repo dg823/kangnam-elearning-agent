@@ -1,0 +1,3 @@
+<resources>
+    <style name="Theme.SongKeeper" parent="android:Theme.Material.NoActionBar" />
+</resources>
