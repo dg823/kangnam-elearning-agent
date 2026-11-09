@@ -18,8 +18,9 @@ from pathlib import Path
 
 from flask import Flask, Response, jsonify, request
 
-from .aggregate import collect_deadlines
+from .aggregate import fetch_precise, merge
 from .assistant import answer_question, build_digest
+from .calendar_ical import fetch_deadlines_via_ical
 from .client import EcampusClient
 from .config import PROJECT_ROOT, Config
 from .llm import get_llm
@@ -32,10 +33,6 @@ app = Flask(__name__)
 _cfg = Config.load()
 _lock = threading.Lock()
 _state: dict = {"deadlines": [], "fetched_at": None, "refreshing": False, "error": None}
-
-# 경고: 클라우드(공개망) 배포 시 WEB_TOKEN 미설정이면 누구나 접근 가능
-if _cfg.web_token:
-    pass  # 보호됨
 
 
 # ------------------------------------------------------------------ #
@@ -61,17 +58,32 @@ def _save_cache() -> None:
         pass
 
 
+STALE_MINUTES = 20           # 이보다 오래된 데이터는 요청이 오면 백그라운드로 갱신
+_refresh_lock = threading.Lock()
+
+
 def refresh() -> None:
-    """로그인·수집을 수행하고 캐시를 갱신한다 (느림, 백그라운드에서 호출)."""
-    if _state["refreshing"]:
+    """2단계 수집: ① iCal(0.3초)을 먼저 화면에 반영 ② 정밀 스크래핑으로 교체.
+
+    느린 작업이므로 백그라운드 스레드에서 호출한다. 동시에 두 번 돌지 않게 잠근다.
+    """
+    if not _refresh_lock.acquire(blocking=False):
         return
     _state["refreshing"] = True
     _state["error"] = None
     try:
         client = EcampusClient(_cfg)
+        ical_items = fetch_deadlines_via_ical(client, ical_url=_cfg.ical_url)
+        # 캐시가 비어 있을 때만 iCal 결과를 먼저 보여준다
+        # (이미 정밀 데이터가 있으면 덜 정확한 iCal 로 덮어쓰지 않음)
+        if not _state["deadlines"] and ical_items:
+            with _lock:
+                _state["deadlines"] = ical_items
+        precise = []
         if _cfg.has_login:
             client.login()
-        deadlines = collect_deadlines(client, ical_url=_cfg.ical_url, scrape=_cfg.has_login)
+            precise = fetch_precise(client)
+        deadlines = merge(precise, ical_items)
         with _lock:
             _state["deadlines"] = deadlines
             _state["fetched_at"] = datetime.now(KST).isoformat()
@@ -80,10 +92,27 @@ def refresh() -> None:
         _state["error"] = str(e)
     finally:
         _state["refreshing"] = False
+        _refresh_lock.release()
 
 
 def refresh_async() -> None:
     threading.Thread(target=refresh, daemon=True).start()
+
+
+def _is_stale() -> bool:
+    ts = _state["fetched_at"]
+    if not ts:
+        return True
+    try:
+        age = datetime.now(KST) - datetime.fromisoformat(ts)
+    except ValueError:
+        return True
+    return age > timedelta(minutes=STALE_MINUTES)
+
+
+def refresh_if_stale() -> None:
+    if _is_stale() and not _state["refreshing"]:
+        refresh_async()
 
 
 # ------------------------------------------------------------------ #
@@ -99,7 +128,7 @@ def _authorized() -> bool:
 
 @app.before_request
 def _guard():
-    if request.path.startswith("/static"):
+    if request.path.startswith("/static") or request.path == "/healthz":
         return None
     if not _authorized():
         return Response("접근 토큰이 필요합니다. URL 끝에 ?token=... 를 붙이세요.", status=401)
@@ -109,11 +138,21 @@ def _guard():
 # ------------------------------------------------------------------ #
 # API
 # ------------------------------------------------------------------ #
+@app.get("/healthz")
+def healthz():
+    """서버 깨우기용 (토큰 불필요, 데이터 노출 없음).
+
+    외부 모니터(UptimeRobot 등)가 주기적으로 부르면 서버가 잠들지 않고,
+    데이터가 오래됐으면 미리 갱신해 둬서 폰에서 열 때 바로 뜬다.
+    """
+    refresh_if_stale()
+    return jsonify({"ok": True})
+
+
 @app.get("/api/data")
 def api_data():
-    # 클라우드(gunicorn)에서 첫 요청 시 아직 수집 전이면 백그라운드 수집 시작
-    if _state["fetched_at"] is None and not _state["refreshing"]:
-        refresh_async()
+    # 데이터가 없거나 오래됐으면 백그라운드로 갱신 (화면은 기존 캐시로 즉시 표시)
+    refresh_if_stale()
     with _lock:
         items = [d.to_dict() | {"days_left": d.days_left} for d in _state["deadlines"]]
     items.sort(key=lambda x: (x["due"] is None, x["due"] or ""))

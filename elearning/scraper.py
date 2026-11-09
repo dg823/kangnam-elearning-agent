@@ -11,6 +11,7 @@ iCal 이 막혀 있거나 상세정보가 필요할 때 사용한다.
 from __future__ import annotations
 
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 from bs4 import BeautifulSoup
@@ -19,6 +20,10 @@ from .client import EcampusClient
 from .models import Course, Deadline
 
 _KST = timezone.utc  # 표시는 로컬에서 변환; 저장은 tz-aware 로
+
+# 동시 요청 수 (강좌 × 활동). 학교 서버에 무리가 가지 않도록 작게 유지.
+COURSE_WORKERS = 4
+ACTIVITY_WORKERS = 4
 
 
 def fetch_courses(client: EcampusClient) -> list[Course]:
@@ -127,14 +132,20 @@ def fetch_course_deadlines(client: EcampusClient, course: Course) -> list[Deadli
         return []
     soup = BeautifulSoup(r.text, "lxml")
     seen: set[str] = set()
-    out: list[Deadline] = []
+    targets: list[tuple[str, str]] = []
     for a in soup.find_all("a", href=re.compile(r"/mod/(assign|quiz)/view\.php\?id=\d+")):
         href = _abs(client, a["href"])
         if href in seen:
             continue
         seen.add(href)
-        title = _activity_title(a)
-        detail = _fetch_activity_detail(client, href)
+        targets.append((href, _activity_title(a)))
+
+    # 활동 페이지들을 동시에 가져온다 (학교 서버 부담을 고려해 동시 4개로 제한)
+    with ThreadPoolExecutor(max_workers=ACTIVITY_WORKERS) as pool:
+        details = list(pool.map(lambda t: _fetch_activity_detail(client, t[0]), targets))
+
+    out: list[Deadline] = []
+    for (href, title), detail in zip(targets, details):
         out.append(
             Deadline(
                 title=title or detail.get("title", ""),

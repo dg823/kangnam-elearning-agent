@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from .calendar_ical import fetch_deadlines_via_ical
 from .client import EcampusClient
 from .models import Deadline
-from .scraper import fetch_course_deadlines, fetch_courses, fetch_upcoming
+from .scraper import COURSE_WORKERS, fetch_course_deadlines, fetch_courses, fetch_upcoming
 
 
 def collect_deadlines(
@@ -21,21 +22,28 @@ def collect_deadlines(
     같은 과제가 두 소스에 모두 있으면 (1)의 정확한 정보를 우선한다.
     progress: 선택적 콜백 progress(msg) — 진행상황 출력용.
     """
-    def _log(msg):
-        if progress:
-            progress(msg)
-
-    precise: list[Deadline] = []
-    if scrape:
-        courses = fetch_courses(client)
-        _log(f"강좌 {len(courses)}개 발견")
-        for i, course in enumerate(courses, 1):
-            items = fetch_course_deadlines(client, course)
-            _log(f"  [{i}/{len(courses)}] {course.name} · 과제/퀴즈 {len(items)}건")
-            precise.extend(items)
-
+    precise = fetch_precise(client, progress) if scrape else []
     ical_items = fetch_deadlines_via_ical(client, ical_url=ical_url)
+    return merge(precise, ical_items)
 
+
+def fetch_precise(client: EcampusClient, progress=None) -> list[Deadline]:
+    """모든 강좌를 동시에 스크래핑한다 (로그인 필요)."""
+    courses = fetch_courses(client)
+    if progress:
+        progress(f"강좌 {len(courses)}개 발견")
+    with ThreadPoolExecutor(max_workers=COURSE_WORKERS) as pool:
+        results = list(pool.map(lambda c: fetch_course_deadlines(client, c), courses))
+    precise: list[Deadline] = []
+    for i, (course, items) in enumerate(zip(courses, results), 1):
+        if progress:
+            progress(f"  [{i}/{len(courses)}] {course.name} · 과제/퀴즈 {len(items)}건")
+        precise.extend(items)
+    return precise
+
+
+def merge(precise: list[Deadline], ical_items: list[Deadline]) -> list[Deadline]:
+    """스크래핑(정밀)과 iCal 결과를 합친다."""
     # 스크래핑(정밀)을 정본으로 삼고, 그와 매칭되는 iCal 항목은 모두 버린다.
     # (iCal 은 퀴즈를 시작/종료 두 건으로 쪼개지만 스크래핑은 한 건에 정확한
     #  종료시각을 담으므로, 매칭되는 iCal 중복을 제거해야 한다.)
