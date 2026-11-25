@@ -123,23 +123,34 @@ KEEPALIVE_SECONDS = 10 * 60        # 10분마다 자기 주소를 불러 깨어 
 KEEPALIVE_REFRESH_HOURS = 3        # 아무도 안 열어도 3시간마다 데이터 미리 갱신
 
 
+_keepalive: dict = {"enabled": False, "ticks": 0, "last_ping": None, "last_ping_error": None}
+
+
 def _keepalive_loop(base_url: str) -> None:
     import requests
     while True:
         time.sleep(KEEPALIVE_SECONDS)
+        _keepalive["ticks"] += 1
         try:
             # 공개 주소로 불러야 Render 가 '외부 요청'으로 보고 재우지 않는다
             requests.get(f"{base_url}/healthz", timeout=30)
-        except Exception:
-            pass
+            _keepalive["last_ping"] = datetime.now(KST).isoformat(timespec="seconds")
+            _keepalive["last_ping_error"] = None
+        except Exception as e:
+            _keepalive["last_ping_error"] = type(e).__name__
         refresh_if_stale(KEEPALIVE_REFRESH_HOURS * 60)
 
 
 def start_keepalive() -> None:
-    """Render 에서만 동작 (Render 가 RENDER_EXTERNAL_URL 을 자동으로 넣어줌)."""
+    """Render 에서만 동작 (Render 가 RENDER_EXTERNAL_URL 을 자동으로 넣어줌).
+
+    시작하자마자 한 번 수집해서, 재배포 직후에도 데이터가 비어 있지 않게 한다.
+    """
     base_url = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
     if base_url:
+        _keepalive["enabled"] = True
         threading.Thread(target=_keepalive_loop, args=(base_url,), daemon=True).start()
+        refresh_async()
 
 
 # ------------------------------------------------------------------ #
@@ -167,8 +178,16 @@ def _guard():
 # ------------------------------------------------------------------ #
 @app.get("/healthz")
 def healthz():
-    """잠들지 않기용 핑 (토큰 불필요, 데이터 노출 없음, 수집도 하지 않음)."""
-    return jsonify({"ok": True})
+    """잠들지 않기용 핑 (토큰 불필요, 수집도 하지 않음).
+
+    과제 내용은 내보내지 않고, 잠들지 않기 상태만 보여준다 (동작 확인용).
+    """
+    return jsonify({
+        "ok": True,
+        "keepalive": _keepalive,
+        "has_data": bool(_state["deadlines"]),
+        "fetched_at": _state["fetched_at"],
+    })
 
 
 @app.get("/api/data")
