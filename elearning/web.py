@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -99,7 +100,7 @@ def refresh_async() -> None:
     threading.Thread(target=refresh, daemon=True).start()
 
 
-def _is_stale() -> bool:
+def _is_stale(minutes: float = STALE_MINUTES) -> bool:
     ts = _state["fetched_at"]
     if not ts:
         return True
@@ -107,12 +108,38 @@ def _is_stale() -> bool:
         age = datetime.now(KST) - datetime.fromisoformat(ts)
     except ValueError:
         return True
-    return age > timedelta(minutes=STALE_MINUTES)
+    return age > timedelta(minutes=minutes)
 
 
-def refresh_if_stale() -> None:
-    if _is_stale() and not _state["refreshing"]:
+def refresh_if_stale(minutes: float = STALE_MINUTES) -> None:
+    if _is_stale(minutes) and not _state["refreshing"]:
         refresh_async()
+
+
+# ------------------------------------------------------------------ #
+# 잠들지 않기 (Render 무료 플랜은 15분간 요청이 없으면 서버를 재운다)
+# ------------------------------------------------------------------ #
+KEEPALIVE_SECONDS = 10 * 60        # 10분마다 자기 주소를 불러 깨어 있게 함
+KEEPALIVE_REFRESH_HOURS = 3        # 아무도 안 열어도 3시간마다 데이터 미리 갱신
+
+
+def _keepalive_loop(base_url: str) -> None:
+    import requests
+    while True:
+        time.sleep(KEEPALIVE_SECONDS)
+        try:
+            # 공개 주소로 불러야 Render 가 '외부 요청'으로 보고 재우지 않는다
+            requests.get(f"{base_url}/healthz", timeout=30)
+        except Exception:
+            pass
+        refresh_if_stale(KEEPALIVE_REFRESH_HOURS * 60)
+
+
+def start_keepalive() -> None:
+    """Render 에서만 동작 (Render 가 RENDER_EXTERNAL_URL 을 자동으로 넣어줌)."""
+    base_url = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
+    if base_url:
+        threading.Thread(target=_keepalive_loop, args=(base_url,), daemon=True).start()
 
 
 # ------------------------------------------------------------------ #
@@ -140,12 +167,7 @@ def _guard():
 # ------------------------------------------------------------------ #
 @app.get("/healthz")
 def healthz():
-    """서버 깨우기용 (토큰 불필요, 데이터 노출 없음).
-
-    외부 모니터(UptimeRobot 등)가 주기적으로 부르면 서버가 잠들지 않고,
-    데이터가 오래됐으면 미리 갱신해 둬서 폰에서 열 때 바로 뜬다.
-    """
-    refresh_if_stale()
+    """잠들지 않기용 핑 (토큰 불필요, 데이터 노출 없음, 수집도 하지 않음)."""
     return jsonify({"ok": True})
 
 
@@ -460,8 +482,9 @@ load();
 </html>"""
 
 
-# 모듈 임포트 시 캐시를 읽어둔다 (gunicorn/클라우드에서 즉시 표시용).
+# 모듈 임포트 시 캐시를 읽어두고, Render 에서는 잠들지 않기 스레드를 시작한다.
 _load_cache()
+start_keepalive()
 
 
 def main() -> None:
