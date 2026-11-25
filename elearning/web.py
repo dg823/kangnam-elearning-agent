@@ -141,16 +141,27 @@ def _keepalive_loop(base_url: str) -> None:
         refresh_if_stale(KEEPALIVE_REFRESH_HOURS * 60)
 
 
+_keepalive_start_lock = threading.Lock()
+
+
 def start_keepalive() -> None:
     """Render 에서만 동작 (Render 가 RENDER_EXTERNAL_URL 을 자동으로 넣어줌).
 
-    시작하자마자 한 번 수집해서, 재배포 직후에도 데이터가 비어 있지 않게 한다.
+    반드시 요청을 처리하는 워커 프로세스 안에서 시작해야 한다. gunicorn 이
+    앱을 불러온 뒤 프로세스를 복제(fork)하면 스레드는 따라가지 않기 때문이다.
+    그래서 gunicorn 훅(gunicorn.conf.py)과 첫 요청 양쪽에서 부르고,
+    프로세스마다 한 번만 시작한다. 시작하자마자 한 번 수집한다.
     """
     base_url = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
-    if base_url:
-        _keepalive["enabled"] = True
-        threading.Thread(target=_keepalive_loop, args=(base_url,), daemon=True).start()
-        refresh_async()
+    if not base_url:
+        return
+    with _keepalive_start_lock:
+        if _keepalive.get("pid") == os.getpid():
+            return
+        _keepalive.update(enabled=True, pid=os.getpid(), ticks=0)
+        threading.Thread(target=_keepalive_loop, args=(base_url,),
+                         name="keepalive", daemon=True).start()
+    refresh_async()
 
 
 # ------------------------------------------------------------------ #
@@ -166,6 +177,7 @@ def _authorized() -> bool:
 
 @app.before_request
 def _guard():
+    start_keepalive()  # 워커에서 아직 안 돌고 있으면 시작 (이미 돌면 바로 반환)
     if request.path.startswith("/static") or request.path == "/healthz":
         return None
     if not _authorized():
@@ -184,7 +196,10 @@ def healthz():
     """
     return jsonify({
         "ok": True,
-        "keepalive": _keepalive,
+        "keepalive": _keepalive | {
+            "this_pid": os.getpid(),
+            "thread_alive": any(t.name == "keepalive" for t in threading.enumerate()),
+        },
         "has_data": bool(_state["deadlines"]),
         "fetched_at": _state["fetched_at"],
     })
@@ -501,9 +516,8 @@ load();
 </html>"""
 
 
-# 모듈 임포트 시 캐시를 읽어두고, Render 에서는 잠들지 않기 스레드를 시작한다.
+# 모듈 임포트 시 캐시를 읽어둔다. (잠들지 않기 스레드는 워커에서 시작 — start_keepalive 참고)
 _load_cache()
-start_keepalive()
 
 
 def main() -> None:
